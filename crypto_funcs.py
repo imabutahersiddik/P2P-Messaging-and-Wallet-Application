@@ -1,10 +1,10 @@
-import SHA256
-import PKCS1_v1_5
-import PKCS1_OAEP
-import RSA
+import hashlib
 import base64
 import json
-
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Signature import PKCS1_v1_5
+from Crypto.Hash import SHA256
 
 def generate_keys():
     private_key = RSA.generate(2048)
@@ -27,11 +27,11 @@ def decrypt(message, key):
 
 def load_key(key):
     key = base64.b64decode(key)
-    return RSA.importKey(key)
+    return RSA.import_key(key)
 
 
 def serialize_key(key):
-    key = base64.b64encode(key.exportKey("DER")).decode("utf-8")
+    key = base64.b64encode(key.export_key("DER")).decode("utf-8")
     return key
 
 
