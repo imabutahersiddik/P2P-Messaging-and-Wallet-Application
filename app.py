@@ -10,10 +10,9 @@ import urllib.request
 import urllib.parse
 import http.client
 import streamlit as st
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
-from Crypto.Signature import PKCS1_v1_5
-from Crypto.Hash import SHA256
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 
 # Constants
 msg_del_time = 30
@@ -139,40 +138,76 @@ class Node(threading.Thread):
 
     def load_key(self, key):
         key = base64.b64decode(key)
-        return RSA.import_key(key)
+        return serialization.load_der_public_key(key, backend=default_backend())
 
     def serialize_key(self, key):
-        key = base64.b64encode(key.export_key("DER")).decode("utf-8")
-        return key
+        return base64.b64encode(key.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )).decode("utf-8")
 
     def generate_keys(self):
-        private_key = RSA.generate(2048)
-        public_key = private_key.publickey()
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        public_key = private_key.public_key()
         return public_key, private_key
 
     def encrypt(self, message, key):
         message = json.dumps(message).encode("utf-8")
-        cipher = PKCS1_OAEP.new(key)
-        return base64.b64encode(cipher.encrypt(message)).decode("utf-8")
+        ciphertext = key.encrypt(
+            message,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return base64.b64encode(ciphertext).decode("utf-8")
 
     def decrypt(self, message, key):
-        cipher = PKCS1_OAEP.new(key)
-        message = cipher.decrypt(base64.b64decode(message))
-        return json.loads(message)
+        ciphertext = base64.b64decode(message)
+        plaintext = key.decrypt(
+            ciphertext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return json.loads(plaintext)
 
     def sign(self, message, private_key):
-        digest = SHA256.new()
+        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
         digest.update(str(message).encode("utf-8"))
-        signer = PKCS1_v1_5.new(private_key)
-        sig = signer.sign(digest)
-        return base64.b64encode(sig).decode("utf-8")
+        signature = private_key.sign(
+            digest.finalize(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return base64.b64encode(signature).decode("utf-8")
 
     def verify(self, message, sig, key):
-        digest = SHA256.new()
+        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
         digest.update(str(message).encode("utf-8"))
-        verifier = PKCS1_v1_5.new(key)
-        verified = verifier.verify(digest, base64.b64decode(sig))
-        return verified
+        try:
+            key.verify(
+                base64.b64decode(sig),
+                digest.finalize(),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            return True
+        except Exception:
+            return False
 
     def network_send(self, message, exc=[]):
         for i in self.nodes_connected:
