@@ -5,7 +5,7 @@ import sys
 import time
 import hashlib
 import streamlit as st
-from .file_transfer import FileDownloader, fileServer, FileManager
+# from .file_transfer import FileDownloader, fileServer, FileManager
 from . import portforwardlib
 from . import crypto_funcs as cf
 import ipaddress
