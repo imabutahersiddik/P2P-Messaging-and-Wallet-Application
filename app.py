@@ -1,437 +1,134 @@
-import threading
-import socket
-import json
-import sys
-import time
-import hashlib
-import base64
-import xml.etree.ElementTree as ET
-import urllib.request
-import urllib.parse
-import http.client
 import streamlit as st
+import hashlib
+import json
+import socket
+import os
+from time import time
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+import base64
 
-# Constants
-msg_del_time = 30
-PORT = 65432
-FILE_PORT = 65433
-REWARD_AMOUNT = 9999
+class Block:
+    def __init__(self, index, previous_hash, timestamp, data, hash):
+        self.index = index
+        self.previous_hash = previous_hash
+        self.timestamp = timestamp
+        self.data = data
+        self.hash = hash
 
-# NodeConnection Class
-class NodeConnection(threading.Thread):
-    def __init__(self, main_node, sock, id, host, port):
-        super(NodeConnection, self).__init__()
-        self.host = host
-        self.port = port
-        self.main_node = main_node
-        self.sock = sock
-        self.terminate_flag = threading.Event()
-        self.last_ping = time.time()
-        self.buffer = ""
-        self.public_key = self.main_node.load_key(id)
-        self.id = id
+def create_genesis_block():
+    return Block(0, "0", time(), "Genesis Block", calculate_hash(0, "0", time(), "Genesis Block"))
 
-        self.main_node.debug_print(
-            "NodeConnection.send: Started with client ("
-            + self.id
-            + ") '"
-            + self.host
-            + ":"
-            + str(self.port)
-            + "'"
-        )
+def calculate_hash(index, previous_hash, timestamp, data):
+    value = str(index) + previous_hash + str(timestamp) + json.dumps(data)
+    return hashlib.sha256(value.encode()).hexdigest()
 
-    def send(self, data):
-        try:
-            data = data + "-TSN"
-            self.sock.sendall(data.encode("utf-8"))
-        except Exception as e:
-            self.main_node.debug_print(
-                "NodeConnection.send: Unexpected error: " + str(e)
-            )
-            self.terminate_flag.set()
+class Blockchain:
+    def __init__(self):
+        self.chain = [create_genesis_block()]
+        self.current_transactions = []
 
-    def stop(self):
-        self.terminate_flag.set()
+    def add_block(self, block):
+        self.chain.append(block)
 
-    def run(self):
-        self.sock.settimeout(10.0)
-        while not self.terminate_flag.is_set():
-            if time.time() - self.last_ping > self.main_node.dead_time:
-                self.terminate_flag.set()
-                print("node" + self.id + " is dead")
+    def create_block(self, data):
+        previous_block = self.chain[-1]
+        index = previous_block.index + 1
+        timestamp = time()
+        hash = calculate_hash(index, previous_block.hash, timestamp, data)
+        block = Block(index, previous_block.hash, timestamp, data, hash)
+        self.add_block(block)
+        return block
 
-            line = ""
-            try:
-                line = self.sock.recv(4096)
-            except socket.timeout:
-                pass
-            except Exception as e:
-                self.terminate_flag.set()
-                self.main_node.debug_print(
-                    "NodeConnection: Socket has been terminated (%s)" % line
-                )
-                self.main_node.debug_print(e)
+class Wallet:
+    def __init__(self):
+        self.wallets = {}
 
-            if line != "":
-                try:
-                    self.buffer += str(line.decode("utf-8"))
-                except Exception as e:
-                    print("NodeConnection: Decoding line error | " + str(e))
+    def create_wallet(self, wallet_name):
+        private_key = os.urandom(32).hex()
+        self.wallets[wallet_name] = private_key
+        return private_key
 
-                index = self.buffer.find("-TSN")
-                while index > 0:
-                    message = self.buffer[0:index]
-                    self.buffer = self.buffer[index + 4 : :]
+    def export_wallet(self, wallet_name):
+        return json.dumps(self.wallets[wallet_name])
 
-                    if message == "ping":
-                        self.last_ping = time.time()
-                    else:
-                        self.main_node.node_message(self, message)
+    def import_wallet(self, wallet_name, private_key):
+        self.wallets[wallet_name] = private_key
 
-                    index = self.buffer.find("-TSN")
+class Transaction:
+    def __init__(self, sender, receiver, amount):
+        self.sender = sender
+        self.receiver = receiver
+        self.amount = amount
 
-            time.sleep(0.01)
+def send_coins(sender_wallet, receiver_wallet, amount):
+    transaction = Transaction(sender_wallet, receiver_wallet, amount)
+    # Add transaction logic here
+    return transaction
 
-        self.main_node.node_disconnected(self)
-        self.sock.settimeout(None)
-        self.sock.close()
-        del self.main_node.nodes_connected[self.main_node.nodes_connected.index(self)]
-        time.sleep(1)
+def send_message(sender, message):
+    blockchain.create_block({"sender": sender, "message": message})
+    reward_sender(sender)
 
-# Node Class
-class Node(threading.Thread):
-    def __init__(self, host="", port=PORT, file_port=FILE_PORT):
-        super(Node, self).__init__()
-        self.terminate_flag = threading.Event()
-        self.pinger = Pinger(self)
-        self.debug = True
-        self.dead_time = 45
-        self.host = host
-        self.ip = host
-        self.port = port
-        self.file_port = file_port
-        self.nodes_connected = []
-        self.requested = []
-        self.msgs = {}
-        self.peers = []
-        self.publickey, self.private_key = self.generate_keys()
-        self.id = self.serialize_key(self.publickey)
-        self.max_peers = 10
-        self.local_ip = socket.gethostbyname(socket.gethostname())
-        self.banned = []
-        self.wallet = {"balance": 0, "address": self.id}  # Initialize wallet
+def send_file(sender, file_data):
+    blockchain.create_block({"sender": sender, "file": file_data})
+    reward_sender(sender)
 
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.debug_print("Initialization of the Node on port: " + str(self.port))
-        self.sock.bind((self.host, self.port))
-        self.sock.settimeout(10.0)
-        self.sock.listen(1)
+def reward_sender(sender):
+    # Logic to reward the sender with 9999 coins
+    print(f"{sender} has been rewarded with 9999 coins!")
 
-    def debug_print(self, msg):
-        if self.debug:
-            print("[debug] " + str(msg))
+def get_public_key(private_key):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"",
+        iterations=100000,
+        backend=default_backend()
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(bytes.fromhex(private_key)))
+    return key.decode()
 
-    def load_key(self, key):
-        key = base64.b64decode(key)
-        return serialization.load_der_public_key(key, backend=default_backend())
-
-    def serialize_key(self, key):
-        return base64.b64encode(key.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )).decode("utf-8")
-
-    def generate_keys(self):
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-            backend=default_backend()
-        )
-        public_key = private_key.public_key()
-        return public_key, private_key
-
-    def encrypt(self, message, key):
-        message = json.dumps(message).encode("utf-8")
-        ciphertext = key.encrypt(
-            message,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-        return base64.b64encode(ciphertext).decode("utf-8")
-
-    def decrypt(self, message, key):
-        ciphertext = base64.b64decode(message)
-        plaintext = key.decrypt(
-            ciphertext,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-        return json.loads(plaintext)
-
-    def sign(self, message, private_key):
-        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-        digest.update(str(message).encode("utf-8"))
-        signature = private_key.sign(
-            digest.finalize(),
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-        return base64.b64encode(signature).decode("utf-8")
-
-    def verify(self, message, sig, key):
-        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-        digest.update(str(message).encode("utf-8"))
-        try:
-            key.verify(
-                base64.b64decode(sig),
-                digest.finalize(),
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
-                hashes.SHA256()
-            )
-            return True
-        except Exception:
-            return False
-
-    def network_send(self, message, exc=[]):
-        for i in self.nodes_connected:
-            if i.host in exc:
-                pass
-            else:
-                i.send(json.dumps(message))
-
-    def connect_to(self, host, port=PORT):
-        if not self.check_ip_to_connect(host):
-            self.debug_print("connect_to: Cannot connect!!")
-            return False
-
-        if len(self.nodes_connected) >= self.max_peers:
-            self.debug_print("Peers limit reached.")
-            return True
-
-        for node in self.nodes_connected:
-            if node.host == host:
-                print("[connect_to]: Already connected with this node.")
-                return True
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.debug_print("connecting to %s port %s" % (host, port))
-            sock.connect((host, port))
-
-            sock.send(self.id.encode("utf-8"))
-            connected_node_id = sock.recv(1024).decode("utf-8")
-
-            if self.id == connected_node_id:
-                self.debug_print("Possible own ip: " + host)
-                if socket.inet_aton(host):
-                    self.local_ip = host
-                else:
-                    self.ip = host
-                self.banned.append(host)
-                sock.close()
-                return False
-
-            thread_client = NodeConnection(self, sock, connected_node_id, host, port)
-            thread_client.start()
-            self.nodes_connected.append(thread_client)
-            self.node_connected(thread_client)
-
-        except Exception as e:
-            self.debug_print("connect_to: Could not connect with node. (" + str(e) + ")")
-
-    def stop(self):
-        self.terminate_flag.set()
-
-    def run(self):
-        self.pinger.start()
-        while not self.terminate_flag.is_set():
-            try:
-                connection, client_address = self.sock.accept()
-                connected_node_id = connection.recv(2048).decode("utf-8")
-                connection.send(self.id.encode("utf-8"))
-
-                if self.id != connected_node_id:
-                    thread_client = NodeConnection(self, connection, connected_node_id, client_address[0], client_address[1])
-                    thread_client.start()
-                    self.nodes_connected.append(thread_client)
-                    self.node_connected(thread_client)
-                else:
-                    connection.close()
-
-            except socket.timeout:
-                pass
-            except Exception as e:
-                raise e
-
-            time.sleep(0.01)
-
-        self.pinger.stop()
-        for t in self.nodes_connected:
-            t.stop()
-
-        self.sock.close()
-        print("Node stopped")
-
-    def send_message(self, data, receiver=None):
-        if receiver:
-            data = self.encrypt(data, self.load_key(receiver))
-        self.message("msg", data, {"rnid": receiver})
-        self.wallet["balance"] += REWARD_AMOUNT  # Reward for sending message
-        self.debug_print(f"Rewarded {REWARD_AMOUNT} coins for sending a message.")
-
-    def message(self, type, data, overrides={}, ex=[]):
-        dict = {"type": type, "data": data}
-        if "time" not in dict:
-            dict["time"] = str(time.time())
-
-        if "snid" not in dict:
-            dict["snid"] = str(self.id)
-
-        if "rnid" not in dict:
-            dict["rnid"] = None
-
-        if "sig" not in dict:
-            dict["sig"] = self.sign(data, self.private_key)
-
-        dict = {**dict, **overrides}
-        self.network_send(dict, ex)
-
-    def check_ip_to_connect(self, ip):
-        if (
-            ip not in self.peers
-            and ip != ""
-            and ip != self.ip
-            and ip != self.local_ip
-            and ip not in self.banned
-        ):
-            return True
-        else:
-            return False
-
-    def node_connected(self, node):
-        self.debug_print("node_connected: " + node.id)
-        if node.host not in self.peers:
-            self.peers.append(node.host)
-        self.send_peers()
-
-    def node_disconnected(self, node):
-        self.debug_print("node_disconnected: " + node.id)
-        if node.host in self.peers:
-            self.peers.remove(node.host)
-
-    def node_message(self, node, data):
-        try:
-            json.loads(data)
-        except json.decoder.JSONDecodeError:
-            self.debug_print(f"Error loading message from {node.id}")
-            return
-        self.data_handler(json.loads(data), [node.host, self.ip])
-
-    def data_handler(self, dta, n):
-        if not self.check_validity(dta):
-            return False
-
-        dta = self.encryption_handler(dta)
-        if not dta:
-            return False
-
-        type = dta["type"]
-        data = dta["data"]
-
-        if type == "msg":
-            self.on_message(data, dta["snid"], bool(dta["rnid"]))
-            self.wallet["balance"] += REWARD_AMOUNT  # Reward for receiving message
-            self.debug_print(f"Rewarded {REWARD_AMOUNT} coins for receiving a message.")
-
-    def check_validity(self, msg):
-        if not ("time" in msg and "type" in msg and "snid" in msg and "sig" in msg and "rnid" in msg):
-            return False
-
-        if not self.verify(msg["data"], msg["sig"], self.load_key(msg["snid"])):
-            self.debug_print(f"Error validating signature of message from {msg['snid']}")
-            return False
-
-        return True
-
-# Pinger Class
-class Pinger(threading.Thread):
-    def __init__(self, parent):
-        self.terminate_flag = threading.Event()
-        super(Pinger, self).__init__()
-        self.parent = parent
-
-    def stop(self):
-        self.terminate_flag.set()
-
-    def run(self):
-        print("Pinger Started")
-        while not self.terminate_flag.is_set():
-            for i in self.parent.nodes_connected:
-                i.send("ping")
-                time.sleep(20)
-        print("Pinger stopped")
-
-# Streamlit Frontend
 def main():
-    st.title("P2P Messaging and Wallet Application")
+    st.title("Blockchain Wallet and Messaging System")
 
-    # Initialize Node
-    node = Node()
-    node.start()
+    wallet = Wallet()
+    blockchain = Blockchain()
 
-    # Wallet Section
-    st.header("Wallet Management")
-    st.write(f"Wallet Address: {node.wallet['address']}")
-    st.write(f"Balance: {node.wallet['balance']} coins")
+    if st.button("Create Wallet"):
+        wallet_name = st.text_input("Enter Wallet Name")
+        private_key = wallet.create_wallet(wallet_name)
+        public_key = get_public_key(private_key)
+        st.success(f"Wallet created with private key: {private_key}")
+        st.success(f"Public key: {public_key}")
 
-    # Send Coins
-    receiver_address = st.text_input("Receiver Address")
-    amount_to_send = st.number_input("Amount to Send", min_value=0)
-    if st.button("Send Coins"):
-        if amount_to_send <= node.wallet["balance"]:
-            node.wallet["balance"] -= amount_to_send
-            st.success(f"Sent {amount_to_send} coins to {receiver_address}.")
-        else:
-            st.error("Insufficient balance!")
-
-    # Messaging Section
-    st.header("Messaging")
-    message = st.text_input("Enter your message:")
     if st.button("Send Message"):
-        node.send_message(message)
-        st.success("Message sent!")
+        sender = st.text_input("Sender Wallet Name")
+        message = st.text_input("Message")
+        send_message(sender, message)
+        st.success("Message sent and block created!")
 
-    # File Upload
-    uploaded_file = st.file_uploader("Upload a file", type=["txt", "pdf", "jpg", "png"])
-    if uploaded_file is not None:
-        file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
-        node.message("file", {"filename": uploaded_file.name, "hash": file_hash})
-        st.success("File sent!")
+    if st.button("Send File"):
+        sender = st.text_input("Sender Wallet Name")
+        file_data = st.file_uploader("Choose a file")
+        if file_data is not None:
+            send_file(sender, file_data.read())
+            st.success("File sent and block created!")
 
-    # Recent Activity
-    st.header("Recent Activity")
-    st.write("Recent messages and files will be displayed here.")
+    st.subheader("Recent Messages and Files")
+    for block in blockchain.chain:
+        if "message" in block.data:
+            st.write(f"Sender: {block.data['sender']}, Message: {block.data['message']}")
+        elif "file" in block.data:
+            st.write(f"Sender: {block.data['sender']}, File: {block.data['file']}")
 
-    # Connected Nodes
-    st.header("Connected Nodes")
-    st.write(f"Currently connected nodes: {len(node.nodes_connected)}")
+    st.subheader("Connected Nodes")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    ip_address = s.getsockname()[0]
+    st.write(f"Current Node: {ip_address}")
+    # Add logic to display connected nodes
 
 if __name__ == "__main__":
     main()
