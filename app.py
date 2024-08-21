@@ -7,7 +7,7 @@ import hashlib
 import streamlit as st
 # from .file_transfer import FileDownloader, fileServer, FileManager
 import portforwardlib
-import crypto_funcs as cf
+#import crypto_funcs as cf
 import ipaddress
 
 # Constants
