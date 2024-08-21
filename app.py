@@ -4,10 +4,6 @@ import json
 import socket
 import os
 from time import time
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.backends import default_backend
-import base64
 
 class Block:
     def __init__(self, index, previous_hash, timestamp, data, hash):
@@ -47,8 +43,9 @@ class Wallet:
 
     def create_wallet(self, wallet_name):
         private_key = os.urandom(32).hex()
+        public_key = hashlib.sha256(private_key.encode()).hexdigest()  # Simple public key generation
         self.wallets[wallet_name] = private_key
-        return private_key
+        return public_key
 
     def export_wallet(self, wallet_name):
         return json.dumps(self.wallets[wallet_name])
@@ -79,39 +76,51 @@ def reward_sender(sender):
     # Logic to reward the sender with 9999 coins
     print(f"{sender} has been rewarded with 9999 coins!")
 
-def get_public_key(private_key):
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=b"",
-        iterations=100000,
-        backend=default_backend()
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(bytes.fromhex(private_key)))
-    return key.decode()
-
 def main():
     st.title("Blockchain Wallet and Messaging System")
 
-    wallet = Wallet()
+    global blockchain
     blockchain = Blockchain()
+    wallet = Wallet()
 
-    if st.button("Create Wallet"):
-        wallet_name = st.text_input("Enter Wallet Name")
-        private_key = wallet.create_wallet(wallet_name)
-        public_key = get_public_key(private_key)
-        st.success(f"Wallet created with private key: {private_key}")
-        st.success(f"Public key: {public_key}")
+    st.sidebar.header("Wallet Management")
+    wallet_name = st.sidebar.text_input("Wallet Name")
+
+    if st.sidebar.button("Create Wallet"):
+        public_key = wallet.create_wallet(wallet_name)
+        st.sidebar.success(f"Wallet created! Public Key: {public_key}")
+
+    if st.sidebar.button("Export Wallet"):
+        try:
+            private_key = wallet.export_wallet(wallet_name)
+            st.sidebar.success(f"Exported Wallet: {private_key}")
+        except KeyError:
+            st.sidebar.error("Wallet not found!")
+
+    if st.sidebar.button("Import Wallet"):
+        private_key = st.sidebar.text_input("Private Key to Import")
+        wallet.import_wallet(wallet_name, private_key)
+        st.sidebar.success("Wallet imported!")
+
+    st.sidebar.header("Send Coins")
+    sender_wallet = st.sidebar.text_input("Sender Wallet Name")
+    receiver_wallet = st.sidebar.text_input("Receiver Wallet Name")
+    amount = st.sidebar.number_input("Amount", min_value=1)
+
+    if st.sidebar.button("Send Coins"):
+        send_coins(sender_wallet, receiver_wallet, amount)
+        st.sidebar.success(f"Sent {amount} coins from {sender_wallet} to {receiver_wallet}!")
+
+    st.header("Messaging and File Sharing")
+    sender = st.text_input("Sender Wallet Name")
 
     if st.button("Send Message"):
-        sender = st.text_input("Sender Wallet Name")
         message = st.text_input("Message")
         send_message(sender, message)
         st.success("Message sent and block created!")
 
     if st.button("Send File"):
-        sender = st.text_input("Sender Wallet Name")
-        file_data = st.file_uploader("Choose a file")
+        file_data = st.file_uploader("Choose a file", type=['txt', 'pdf', 'png', 'jpg'])
         if file_data is not None:
             send_file(sender, file_data.read())
             st.success("File sent and block created!")
