@@ -7,10 +7,10 @@
 
 import socket
 import re
-from urllib.parse import urlparse
+import urlparse
 import urllib.request, urllib.parse, urllib.error
-from xml.dom.minidom import parseString
-from xml.dom.minidom import Document
+import parseString
+import Document
 import http.client
 import time
 import sys
