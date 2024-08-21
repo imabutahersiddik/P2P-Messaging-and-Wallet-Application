@@ -1,7 +1,7 @@
-from Crypto.Hash import SHA256
-from Crypto.Signature import PKCS1_v1_5
-from Crypto.Cipher import PKCS1_OAEP
-from Crypto.PublicKey import RSA
+import SHA256
+import PKCS1_v1_5
+import PKCS1_OAEP
+import RSA
 import base64
 import json
 
