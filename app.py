@@ -4,11 +4,16 @@ import json
 import sys
 import time
 import hashlib
+import base64
+import xml.etree.ElementTree as ET
+import urllib.request
+import urllib.parse
+import http.client
 import streamlit as st
-# from .file_transfer import FileDownloader, fileServer, FileManager
-import portforwardlib
-#import crypto_funcs as cf
-import ipaddress
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Signature import PKCS1_v1_5
+from Crypto.Hash import SHA256
 
 # Constants
 msg_del_time = 30
@@ -27,7 +32,7 @@ class NodeConnection(threading.Thread):
         self.terminate_flag = threading.Event()
         self.last_ping = time.time()
         self.buffer = ""
-        self.public_key = cf.load_key(id)
+        self.public_key = self.main_node.load_key(id)
         self.id = id
 
         self.main_node.debug_print(
@@ -104,8 +109,6 @@ class Node(threading.Thread):
         super(Node, self).__init__()
         self.terminate_flag = threading.Event()
         self.pinger = Pinger(self)
-        self.file_manager = FileManager()
-        self.fileServer = fileServer(self, file_port)
         self.debug = True
         self.dead_time = 45
         self.host = host
@@ -116,24 +119,60 @@ class Node(threading.Thread):
         self.requested = []
         self.msgs = {}
         self.peers = []
-        self.publickey, self.private_key = cf.generate_keys()
-        self.id = cf.serialize_key(self.publickey)
+        self.publickey, self.private_key = self.generate_keys()
+        self.id = self.serialize_key(self.publickey)
         self.max_peers = 10
         self.local_ip = socket.gethostbyname(socket.gethostname())
         self.banned = []
-        portforwardlib.forwardPort(port, port, None, None, False, "TCP", 0, "", True)
-        portforwardlib.forwardPort(file_port, file_port, None, None, False, "TCP", 0, "", True)
+        self.wallet = {"balance": 0, "address": self.id}  # Initialize wallet
+
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.debug_print("Initialization of the Node on port: " + str(self.port))
         self.sock.bind((self.host, self.port))
         self.sock.settimeout(10.0)
         self.sock.listen(1)
-        self.wallet = {"balance": 0, "address": self.id}  # Initialize wallet
 
     def debug_print(self, msg):
         if self.debug:
             print("[debug] " + str(msg))
+
+    def load_key(self, key):
+        key = base64.b64decode(key)
+        return RSA.import_key(key)
+
+    def serialize_key(self, key):
+        key = base64.b64encode(key.export_key("DER")).decode("utf-8")
+        return key
+
+    def generate_keys(self):
+        private_key = RSA.generate(2048)
+        public_key = private_key.publickey()
+        return public_key, private_key
+
+    def encrypt(self, message, key):
+        message = json.dumps(message).encode("utf-8")
+        cipher = PKCS1_OAEP.new(key)
+        return base64.b64encode(cipher.encrypt(message)).decode("utf-8")
+
+    def decrypt(self, message, key):
+        cipher = PKCS1_OAEP.new(key)
+        message = cipher.decrypt(base64.b64decode(message))
+        return json.loads(message)
+
+    def sign(self, message, private_key):
+        digest = SHA256.new()
+        digest.update(str(message).encode("utf-8"))
+        signer = PKCS1_v1_5.new(private_key)
+        sig = signer.sign(digest)
+        return base64.b64encode(sig).decode("utf-8")
+
+    def verify(self, message, sig, key):
+        digest = SHA256.new()
+        digest.update(str(message).encode("utf-8"))
+        verifier = PKCS1_v1_5.new(key)
+        verified = verifier.verify(digest, base64.b64decode(sig))
+        return verified
 
     def network_send(self, message, exc=[]):
         for i in self.nodes_connected:
@@ -166,7 +205,7 @@ class Node(threading.Thread):
 
             if self.id == connected_node_id:
                 self.debug_print("Possible own ip: " + host)
-                if ipaddress.ip_address(host).is_private:
+                if socket.inet_aton(host):
                     self.local_ip = host
                 else:
                     self.ip = host
@@ -174,7 +213,7 @@ class Node(threading.Thread):
                 sock.close()
                 return False
 
-            thread_client = self.create_new_connection(sock, connected_node_id, host, port)
+            thread_client = NodeConnection(self, sock, connected_node_id, host, port)
             thread_client.start()
             self.nodes_connected.append(thread_client)
             self.node_connected(thread_client)
@@ -182,17 +221,11 @@ class Node(threading.Thread):
         except Exception as e:
             self.debug_print("connect_to: Could not connect with node. (" + str(e) + ")")
 
-    def create_new_connection(self, connection, id, host, port):
-        return NodeConnection(self, connection, id, host, port)
-
     def stop(self):
         self.terminate_flag.set()
-        portforwardlib.forwardPort(self.host, self.port, None, None, True, "TCP", 0, "PYHTON-P2P-NODE", True)
-        portforwardlib.forwardPort(self.host, self.file_port, None, None, True, "TCP", 0, "PYHTON-P2P-FILESERVER", True)
 
     def run(self):
         self.pinger.start()
-        self.fileServer.start()
         while not self.terminate_flag.is_set():
             try:
                 connection, client_address = self.sock.accept()
@@ -200,7 +233,7 @@ class Node(threading.Thread):
                 connection.send(self.id.encode("utf-8"))
 
                 if self.id != connected_node_id:
-                    thread_client = self.create_new_connection(connection, connected_node_id, client_address[0], client_address[1])
+                    thread_client = NodeConnection(self, connection, connected_node_id, client_address[0], client_address[1])
                     thread_client.start()
                     self.nodes_connected.append(thread_client)
                     self.node_connected(thread_client)
@@ -215,7 +248,6 @@ class Node(threading.Thread):
             time.sleep(0.01)
 
         self.pinger.stop()
-        self.fileServer.stop()
         for t in self.nodes_connected:
             t.stop()
 
@@ -224,7 +256,7 @@ class Node(threading.Thread):
 
     def send_message(self, data, receiver=None):
         if receiver:
-            data = cf.encrypt(data, cf.load_key(receiver))
+            data = self.encrypt(data, self.load_key(receiver))
         self.message("msg", data, {"rnid": receiver})
         self.wallet["balance"] += REWARD_AMOUNT  # Reward for sending message
         self.debug_print(f"Rewarded {REWARD_AMOUNT} coins for sending a message.")
@@ -241,23 +273,41 @@ class Node(threading.Thread):
             dict["rnid"] = None
 
         if "sig" not in dict:
-            dict["sig"] = cf.sign(data, self.private_key)
+            dict["sig"] = self.sign(data, self.private_key)
 
         dict = {**dict, **overrides}
         self.network_send(dict, ex)
 
-    def check_validity(self, msg):
-        if not ("time" in msg and "type" in msg and "snid" in msg and "sig" in msg and "rnid" in msg):
+    def check_ip_to_connect(self, ip):
+        if (
+            ip not in self.peers
+            and ip != ""
+            and ip != self.ip
+            and ip != self.local_ip
+            and ip not in self.banned
+        ):
+            return True
+        else:
             return False
 
-        if not cf.verify(msg["data"], msg["sig"], cf.load_key(msg["snid"])):
-            self.debug_print(f"Error validating signature of message from {msg['snid']}")
-            return False
+    def node_connected(self, node):
+        self.debug_print("node_connected: " + node.id)
+        if node.host not in self.peers:
+            self.peers.append(node.host)
+        self.send_peers()
 
-        if msg["type"] == "resp":
-            if "ip" not in msg and "localip" not in msg:
-                return False
-        return True
+    def node_disconnected(self, node):
+        self.debug_print("node_disconnected: " + node.id)
+        if node.host in self.peers:
+            self.peers.remove(node.host)
+
+    def node_message(self, node, data):
+        try:
+            json.loads(data)
+        except json.decoder.JSONDecodeError:
+            self.debug_print(f"Error loading message from {node.id}")
+            return
+        self.data_handler(json.loads(data), [node.host, self.ip])
 
     def data_handler(self, dta, n):
         if not self.check_validity(dta):
@@ -275,19 +325,15 @@ class Node(threading.Thread):
             self.wallet["balance"] += REWARD_AMOUNT  # Reward for receiving message
             self.debug_print(f"Rewarded {REWARD_AMOUNT} coins for receiving a message.")
 
-    def on_message(self, data, sender, private):
-        self.debug_print("Incoming Message: " + data)
+    def check_validity(self, msg):
+        if not ("time" in msg and "type" in msg and "snid" in msg and "sig" in msg and "rnid" in msg):
+            return False
 
-    def node_connected(self, node):
-        self.debug_print("node_connected: " + node.id)
-        if node.host not in self.peers:
-            self.peers.append(node.host)
-        self.send_peers()
+        if not self.verify(msg["data"], msg["sig"], self.load_key(msg["snid"])):
+            self.debug_print(f"Error validating signature of message from {msg['snid']}")
+            return False
 
-    def node_disconnected(self, node):
-        self.debug_print("node_disconnected: " + node.id)
-        if node.host in self.peers:
-            self.peers.remove(node.host)
+        return True
 
 # Pinger Class
 class Pinger(threading.Thread):
